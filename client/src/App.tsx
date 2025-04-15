@@ -4,11 +4,10 @@ import {
   Container, 
   LinearProgress, 
   Paper, 
-  Typography
+  Typography,
 } from '@mui/material'
 import { DownloadStatus } from './components/DownloadStatus'
 import { useReportGeneration } from './hooks/useReportGeneration'
-import './App.css'
 
 const API_BASE_URL = 'http://localhost:3000/api'
 
