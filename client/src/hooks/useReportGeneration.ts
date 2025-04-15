@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
 interface ReportStatus {
@@ -57,6 +57,7 @@ export function useReportGeneration<T = any>(options: UseReportGenerationOptions
 
   const storageKey = storageConfig.key ?? DEFAULT_STORAGE_CONFIG.key
   const expiryTime = storageConfig.expiryTime ?? DEFAULT_STORAGE_CONFIG.expiryTime
+  const eventSourcesRef = useRef<{ [key: string]: EventSource }>({})
 
   const [jobs, setJobs] = useState<ReportJob[]>(() => {
     const storedJobs = localStorage.getItem(storageKey)
@@ -104,60 +105,63 @@ export function useReportGeneration<T = any>(options: UseReportGenerationOptions
     },
   })
 
+  // Effect to handle SSE connections for new pending jobs
   useEffect(() => {
-    const eventSources: { [key: string]: EventSource } = {}
+    const newPendingJobs = jobs.filter(
+      job => job.status.status === 'pending' && !eventSourcesRef.current[job.id]
+    )
 
-    jobs.forEach(job => {
-      if (job.status.status === 'pending' && !eventSources[job.id]) {
-        const eventSource = new EventSource(apiConfig.statusEndpoint(job.id))
-        eventSources[job.id] = eventSource
+    newPendingJobs.forEach(job => {
+      const eventSource = new EventSource(`${apiConfig.baseUrl}${apiConfig.statusEndpoint(job.id)}`)
+      eventSourcesRef.current[job.id] = eventSource
 
-        eventSource.onmessage = (event) => {
-          const data = responseHandlers.parseStatusResponse(JSON.parse(event.data))
-          setJobs(prev => prev.map(j => {
-            if (j.id === job.id) {
-              const updatedJob: ReportJob = { 
-                ...j, 
-                status: { ...data, timestamp: Date.now() } 
-              }
-              
-              if (data.status === 'completed' && !j.downloaded) {
-                window.location.href = apiConfig.downloadEndpoint(job.id)
-                const finalJob: ReportJob = { ...updatedJob, downloaded: true }
-                onJobCompleted?.(finalJob)
-                return finalJob
-              }
-              
-              if (data.status === 'failed') {
-                onJobFailed?.(updatedJob)
-              }
-              
-              return updatedJob
+      eventSource.onmessage = (event) => {
+        const data = responseHandlers.parseStatusResponse(JSON.parse(event.data))
+        setJobs(prev => prev.map(j => {
+          if (j.id === job.id) {
+            const updatedJob: ReportJob = { 
+              ...j, 
+              status: { ...data, timestamp: Date.now() } 
             }
-            return j
-          }))
-
-          if (data.status === 'completed' || data.status === 'failed') {
-            eventSource.close()
+            
+            if (data.status === 'completed' && !j.downloaded) {
+              window.location.href = `${apiConfig.baseUrl}${apiConfig.downloadEndpoint(job.id)}`
+              const finalJob: ReportJob = { ...updatedJob, downloaded: true }
+              onJobCompleted?.(finalJob)
+              return finalJob
+            }
+            
+            if (data.status === 'failed') {
+              onJobFailed?.(updatedJob)
+            }
+            
+            return updatedJob
           }
-        }
+          return j
+        }))
 
-        eventSource.onerror = () => {
-          const failedJob: ReportJob = { 
-            ...job, 
-            status: { status: 'failed' as const, error: 'Connection error', timestamp: Date.now() } 
-          }
-          setJobs(prev => prev.map(j => j.id === job.id ? failedJob : j))
-          onJobFailed?.(failedJob)
+        if (data.status === 'completed' || data.status === 'failed') {
           eventSource.close()
+          delete eventSourcesRef.current[job.id]
         }
+      }
+
+      eventSource.onerror = () => {
+        const failedJob: ReportJob = { 
+          ...job, 
+          status: { status: 'failed' as const, error: 'Connection error', timestamp: Date.now() } 
+        }
+        setJobs(prev => prev.map(j => j.id === job.id ? failedJob : j))
+        onJobFailed?.(failedJob)
+        eventSource.close()
+        delete eventSourcesRef.current[job.id]
       }
     })
 
     return () => {
-      Object.values(eventSources).forEach(es => es.close())
+      // Cleanup will be handled by the individual event sources when they complete or fail
     }
-  }, [jobs, apiConfig, responseHandlers, onJobCompleted, onJobFailed])
+  }, [jobs.length, apiConfig, responseHandlers, onJobCompleted, onJobFailed])
 
   const handleRemoveJob = (jobId: string) => {
     setJobs(prev => {
@@ -167,6 +171,11 @@ export function useReportGeneration<T = any>(options: UseReportGenerationOptions
       }
       return updatedJobs
     })
+    // Close the event source if it exists
+    if (eventSourcesRef.current[jobId]) {
+      eventSourcesRef.current[jobId].close()
+      delete eventSourcesRef.current[jobId]
+    }
   }
 
   const handleCancelAll = () => {
@@ -175,6 +184,9 @@ export function useReportGeneration<T = any>(options: UseReportGenerationOptions
       setShowDownloadSection(false)
       return completedJobs
     })
+    // Close all event sources
+    Object.values(eventSourcesRef.current).forEach(es => es.close())
+    eventSourcesRef.current = {}
   }
 
   return {
